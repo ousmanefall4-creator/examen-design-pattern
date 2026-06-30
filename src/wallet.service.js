@@ -2,7 +2,46 @@ const { v4: uuidv4 } = require('uuid');
 const walletRepository = require('./wallet.repository');
 const { Wallet } = require('./wallet.model');
 
+// =========================================================================
+// PATTERN STRATEGY : Gestion des frais de retrait (Étape 1.7)
+// =========================================================================
+
+// Interface de base pour la stratégie de calcul des frais
+class FeeStrategy {
+    calculateFee(amount) {
+        throw new Error("La méthode calculateFee doit être implémentée !");
+    }
+}
+
+// Implémentation concrète : 1% du montant, plafonné à 5000 CFA
+class StandardWithdrawFeeStrategy extends FeeStrategy {
+    calculateFee(amount) {
+        let fees = amount * 0.01;
+        if (fees > 5000) {
+            fees = 5000;
+        }
+        return fees;
+    }
+}
+
+// =========================================================================
+// SERVICE : WalletService
+// =========================================================================
+
 class WalletService {
+    
+    constructor() {
+        // Injection de la stratégie par défaut lors de l'instanciation du service
+        this.feeStrategy = new StandardWithdrawFeeStrategy();
+    }
+
+    /**
+     * Permet de modifier dynamiquement la stratégie de frais à la volée
+     * @param {FeeStrategy} strategy 
+     */
+    setFeeStrategy(strategy) {
+        this.feeStrategy = strategy;
+    }
     
     createWallet(data) {
         if (walletRepository.findByPhoneNumber(data.phoneNumber)) {
@@ -91,10 +130,12 @@ class WalletService {
         return this.getBalance(phoneNumber);
     }
 
+    // Méthode de retrait refactorisée avec le Pattern Strategy
     withdraw(phoneNumber, amount) {
         const currentBalance = this.getBalance(phoneNumber).balance;
-        let fees = amount * 0.01;
-        if (fees > 5000) fees = 5000;
+        
+        // Délégation du calcul des frais à l'objet stratégie configuré
+        const fees = this.feeStrategy.calculateFee(amount);
         
         const totalDeduction = amount + fees;
 

@@ -208,6 +208,54 @@ class WalletService {
             { reference: "FAC-WOY-3-2", serviceName: "WOYAFAL", amount: 10000, dueDate: fin, status: "UNPAID" }
         ];
     }
+
+    /**
+     * Traite le règlement groupé de plusieurs factures (Étape 2.2 / 2.3)
+     * @param {string} phoneNumber 
+     * @param {string} serviceName 
+     * @param {Array<string>} factureReferences 
+     */
+    payFactures(phoneNumber, serviceName, factureReferences) {
+        const wallet = this.getWalletByPhone(phoneNumber);
+        
+        // Récupération des factures fictives pour obtenir les montants associés
+        const currentInvoices = this.getCurrentInvoices(wallet.code, serviceName);
+        const invoicesToPay = currentInvoices.filter(invoice => 
+            factureReferences.includes(invoice.reference) && invoice.status === "UNPAID"
+        );
+
+        if (invoicesToPay.length === 0) {
+            const error = new Error("Aucune facture impayée correspondante n'a été trouvée.");
+            error.status = 404;
+            throw error;
+        }
+
+        // Somme cumulative des montants de factures ciblées
+        const totalAmount = invoicesToPay.reduce((sum, invoice) => sum + invoice.amount, 0);
+        const currentBalance = this.getBalance(phoneNumber).balance;
+
+        if (currentBalance < totalAmount) {
+            const error = new Error("Solde insuffisant pour le paiement groupé de ces factures.");
+            error.status = 402;
+            throw error;
+        }
+
+        // Enregistrement de l'événement unique de débit
+        walletRepository.saveEvent({
+            id: uuidv4(),
+            walletId: wallet.id,
+            type: 'DEBIT',
+            amount: Math.floor(totalAmount),
+            timestamp: new Date()
+        });
+
+        return {
+            message: "Paiement groupé effectué avec succès.",
+            totalPaid: totalAmount,
+            paidInvoices: invoicesToPay.map(fac => fac.reference),
+            remainingBalance: this.getBalance(phoneNumber).balance
+        };
+    }
 }
 
 module.exports = new WalletService();

@@ -2,7 +2,46 @@ const { v4: uuidv4 } = require('uuid');
 const walletRepository = require('./wallet.repository');
 const { Wallet } = require('./wallet.model');
 
+// =========================================================================
+// PATTERN STRATEGY : Gestion des frais de retrait (Étape 1.7)
+// =========================================================================
+
+// Interface de base pour la stratégie de calcul des frais
+class FeeStrategy {
+    calculateFee(amount) {
+        throw new Error("La méthode calculateFee doit être implémentée !");
+    }
+}
+
+// Implémentation concrète : 1% du montant, plafonné à 5000 CFA
+class StandardWithdrawFeeStrategy extends FeeStrategy {
+    calculateFee(amount) {
+        let fees = amount * 0.01;
+        if (fees > 5000) {
+            fees = 5000;
+        }
+        return fees;
+    }
+}
+
+// =========================================================================
+// SERVICE : WalletService
+// =========================================================================
+
 class WalletService {
+    
+    constructor() {
+        // Injection de la stratégie par défaut lors de l'instanciation du service
+        this.feeStrategy = new StandardWithdrawFeeStrategy();
+    }
+
+    /**
+     * Permet de modifier dynamiquement la stratégie de frais à la volée
+     * @param {FeeStrategy} strategy 
+     */
+    setFeeStrategy(strategy) {
+        this.feeStrategy = strategy;
+    }
     
     createWallet(data) {
         if (walletRepository.findByPhoneNumber(data.phoneNumber)) {
@@ -91,10 +130,12 @@ class WalletService {
         return this.getBalance(phoneNumber);
     }
 
+    // Méthode de retrait refactorisée avec le Pattern Strategy
     withdraw(phoneNumber, amount) {
         const currentBalance = this.getBalance(phoneNumber).balance;
-        let fees = amount * 0.01;
-        if (fees > 5000) fees = 5000;
+        
+        // Délégation du calcul des frais à l'objet stratégie configuré
+        const fees = this.feeStrategy.calculateFee(amount);
         
         const totalDeduction = amount + fees;
 
@@ -166,6 +207,54 @@ class WalletService {
             { reference: "FAC-ISM-3-1", serviceName: "ISM", amount: 5000, dueDate: debut, status: "UNPAID" },
             { reference: "FAC-WOY-3-2", serviceName: "WOYAFAL", amount: 10000, dueDate: fin, status: "UNPAID" }
         ];
+    }
+
+    /**
+     * Traite le règlement groupé de plusieurs factures (Étape 2.2 / 2.3)
+     * @param {string} phoneNumber 
+     * @param {string} serviceName 
+     * @param {Array<string>} factureReferences 
+     */
+    payFactures(phoneNumber, serviceName, factureReferences) {
+        const wallet = this.getWalletByPhone(phoneNumber);
+        
+        // Récupération des factures fictives pour obtenir les montants associés
+        const currentInvoices = this.getCurrentInvoices(wallet.code, serviceName);
+        const invoicesToPay = currentInvoices.filter(invoice => 
+            factureReferences.includes(invoice.reference) && invoice.status === "UNPAID"
+        );
+
+        if (invoicesToPay.length === 0) {
+            const error = new Error("Aucune facture impayée correspondante n'a été trouvée.");
+            error.status = 404;
+            throw error;
+        }
+
+        // Somme cumulative des montants de factures ciblées
+        const totalAmount = invoicesToPay.reduce((sum, invoice) => sum + invoice.amount, 0);
+        const currentBalance = this.getBalance(phoneNumber).balance;
+
+        if (currentBalance < totalAmount) {
+            const error = new Error("Solde insuffisant pour le paiement groupé de ces factures.");
+            error.status = 402;
+            throw error;
+        }
+
+        // Enregistrement de l'événement unique de débit
+        walletRepository.saveEvent({
+            id: uuidv4(),
+            walletId: wallet.id,
+            type: 'DEBIT',
+            amount: Math.floor(totalAmount),
+            timestamp: new Date()
+        });
+
+        return {
+            message: "Paiement groupé effectué avec succès.",
+            totalPaid: totalAmount,
+            paidInvoices: invoicesToPay.map(fac => fac.reference),
+            remainingBalance: this.getBalance(phoneNumber).balance
+        };
     }
 }
 
